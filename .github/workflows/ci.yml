@@ -32,8 +32,7 @@ jobs:
           draft: false
           prerelease: false
 
-  controller:
-    name: configmap controller build
+  build:
     runs-on: ubuntu-latest
     permissions: write-all
     env:
