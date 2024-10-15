@@ -180,7 +180,7 @@ func (h *Handler) GetUserFromToken(token jwt.Token) (*User, error) {
 	}
 
 	return &User{
-		UserId:   userId.(int),
+		UserId:   int(userId.(float64)),
 		Username: username.(string),
 		Name:     name.(string),
 		Email:    email.(string),
