@@ -1,0 +1,36 @@
+version: "3"
+
+services:
+  traefik:
+    image: "traefik:v3.0"
+    container_name: "traefik"
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entryPoints.web.address=:80"
+    ports:
+      - "8080:80"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+  # uncomment to build and use docker image
+  # github-fwd-auth:
+  #   build:
+  #     context: ../../
+  #     dockerfile: Dockerfile
+  #   container_name: "github-fwd-auth"
+  #   env_file: ../../github-fwd-auth.env
+  whoami:
+    image: "traefik/whoami"
+    container_name: "whoami"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoami.rule=Host(`localhost`)"
+      - "traefik.http.routers.whoami.entrypoints=web"
+      - "traefik.http.middlewares.ui-fwd-auth.forwardauth.authResponseHeaders=Authorization"
+      - "traefik.http.routers.whoami.middlewares=ui-fwd-auth@docker"
+      # use for development
+      - "traefik.http.middlewares.ui-fwd-auth.forwardauth.address=http://host.docker.internal:8090/ui-auth"
+      # use for testing with docker image
+      # - "traefik.http.middlewares.ui-fwd-auth.forwardauth.address=http://github-fwd-auth:8090/ui-auth"
