@@ -174,9 +174,14 @@ func (h *Handler) GetUserFromToken(token jwt.Token) (*User, error) {
 		return nil, errors.New("no email found in token")
 	}
 
-	teams, ok := token.Get("teams")
+	teamsInterface, ok := token.Get("teams")
 	if !ok {
 		log.Warn().Msgf("no teams found in token for user %s", username)
+	}
+
+	teams := []string{}
+	for _, team := range teamsInterface.([]interface{}) {
+		teams = append(teams, team.(string))
 	}
 
 	return &User{
@@ -184,7 +189,7 @@ func (h *Handler) GetUserFromToken(token jwt.Token) (*User, error) {
 		Username: username.(string),
 		Name:     name.(string),
 		Email:    email.(string),
-		Teams:    teams.([]string),
+		Teams:    teams,
 	}, nil
 }
 
