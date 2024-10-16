@@ -29,18 +29,24 @@ func (s *Server) addJwtHeader(c *gin.Context) error {
 		return fmt.Errorf("no session found for request")
 	}
 
-	token := s.Options.JwtSigner.NewToken()
-	token.Set("sub", session.UserInformation.Profile.Login)
-	token.Set("uid", session.UserInformation.Profile.ID)
-	token.Set("name", session.UserInformation.Profile.Name)
-	token.Set("email", session.UserInformation.Profile.Email)
-	token.Set("teams", github.GetTeamSlugs(session.UserInformation.Teams))
+	tokenString, ok := s.JwtCache.Get(session.Id)
+	if !ok {
+		token := s.Options.JwtSigner.NewToken()
+		token.Set("sub", session.UserInformation.Profile.Login)
+		token.Set("uid", session.UserInformation.Profile.ID)
+		token.Set("name", session.UserInformation.Profile.Name)
+		token.Set("email", session.UserInformation.Profile.Email)
+		token.Set("teams", github.GetTeamSlugs(session.UserInformation.Teams))
 
-	tokenData, err := s.Options.JwtSigner.SignToken(token)
-	if err != nil {
-		return err
+		tokenData, err := s.Options.JwtSigner.SignToken(token)
+		if err != nil {
+			return err
+		}
+
+		tokenString = string(tokenData)
+		s.JwtCache.Add(session.Id, tokenString)
 	}
 
-	c.Header("Authorization", "Bearer "+string(tokenData))
+	c.Header("Authorization", "Bearer "+tokenString)
 	return nil
 }

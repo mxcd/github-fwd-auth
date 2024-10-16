@@ -3,12 +3,15 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/mxcd/github-fwd-auth/internal/oauth"
 	"github.com/mxcd/github-fwd-auth/internal/session"
 	"github.com/mxcd/github-fwd-auth/pkg/jwt"
 	"github.com/rs/zerolog/log"
+
+	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
 type ServerOptions struct {
@@ -24,6 +27,7 @@ type Server struct {
 	Options    *ServerOptions
 	Engine     *gin.Engine
 	HttpServer *http.Server
+	JwtCache   *expirable.LRU[string, string]
 }
 
 type FwdAuthType string
@@ -38,8 +42,9 @@ func NewServer(options *ServerOptions) *Server {
 	engine := gin.New()
 
 	s := &Server{
-		Options: options,
-		Engine:  engine,
+		Options:  options,
+		Engine:   engine,
+		JwtCache: expirable.NewLRU[string, string](1000, nil, time.Minute),
 	}
 
 	engine.GET("/health", func(c *gin.Context) {
