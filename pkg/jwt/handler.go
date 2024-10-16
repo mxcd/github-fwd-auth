@@ -32,11 +32,11 @@ type Handler struct {
 }
 
 type User struct {
-	UserId   int
-	Username string
-	Name     string
-	Email    string
-	Teams    []string
+	UserId   int      `json:"userId"`
+	Username string   `json:"username"`
+	Name     string   `json:"name"`
+	Email    string   `json:"email"`
+	Teams    []string `json:"teams"`
 }
 
 func NewHandler(options *HandlerOptions) (*Handler, error) {
