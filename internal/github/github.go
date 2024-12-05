@@ -53,7 +53,7 @@ type Team struct {
 	Permission          string       `json:"permission"`
 	MembersURL          string       `json:"members_url"`
 	RepositoriesURL     string       `json:"repositories_url"`
-	Parent              *string      `json:"parent"`
+	Parent              *Team        `json:"parent"`
 	MembersCount        int          `json:"members_count"`
 	ReposCount          int          `json:"repos_count"`
 	CreatedAt           string       `json:"created_at"`
