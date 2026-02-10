@@ -87,6 +87,21 @@ func (h *Handle) IsUserAdmin(teams *[]Team) bool {
 	return h.handler.isUserAdmin(teams)
 }
 
+// GetAllowedTeams returns the configured allowed teams (normalized to lowercase).
+func (h *Handle) GetAllowedTeams() []string {
+	return h.handler.config.allowedTeams
+}
+
+// GetAdminTeams returns the configured admin teams (normalized to lowercase).
+func (h *Handle) GetAdminTeams() []string {
+	return h.handler.config.adminTeams
+}
+
+// GetRelevantTeamConfig returns the configured relevant teams (normalized to lowercase).
+func (h *Handle) GetRelevantTeamConfig() []string {
+	return h.handler.config.relevantTeams
+}
+
 // IsAuthenticated returns true if the current request was authenticated
 // by the OAuth middleware (via session or API key).
 func (h *Handle) IsAuthenticated(c *gin.Context) bool {

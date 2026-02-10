@@ -197,6 +197,16 @@ router.GET("/api/resource", func(c *gin.Context) {
 | `handle.IsAdmin(c)` | `bool` | `true` if the user is in any `AdminTeams` team |
 | `handle.GetRelevantTeams(c)` | `[]string` | Configured `RelevantTeams` the user belongs to |
 
+### Reading configured teams
+
+The `Handle` also exposes getters for the team lists that were passed in via `Config` (all normalized to lowercase):
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `handle.GetAllowedTeams()` | `[]string` | Configured `AllowedTeams` |
+| `handle.GetAdminTeams()` | `[]string` | Configured `AdminTeams` |
+| `handle.GetRelevantTeamConfig()` | `[]string` | Configured `RelevantTeams` |
+
 ## Working with Sessions
 
 ```go
