@@ -1,15 +1,17 @@
 ## GitHub Forward Auth
 
-This project is a `traefik` forward auth middleware that uses GitHub OAuth to authenticate users.  
-A GitHub OAuth App is required to use this middleware.  
-If configured, it can create a JWT holding the user's GitHub username and the teams the user is a member of.  
+This project is a `traefik` forward auth middleware that uses GitHub OAuth to authenticate users.
+A GitHub OAuth App is required to use this middleware.
+If configured, it can create a JWT holding the user's GitHub username and the teams the user is a member of.
 A `/JWKS` endpoint is available to retrieve the public key to verify the JWT.
+
+The OAuth and session management functionality is available as a standalone library at [`pkg/githuboauth`](pkg/githuboauth/). See the [library documentation](pkg/githuboauth/README.md) for usage in your own Go applications.
 
 ## Configuration
 
 The forward auth middleware can be configured using environment variables or a `.env` file called `github-fwd-auth.env`. In the docker image, the `.env` file is located at `/github-fwd-auth.env`.
 
-| Environment Varialbe             | Type     | Default Value            | Comment                      |
+| Environment Variable             | Type     | Default Value            | Comment                      |
 | -------------------------------- | -------- | ------------------------ | ---------------------------- |
 | `BASE_URL`                       | String   | "http://localhost:8080"  | Must not be empty            |
 | `LOG_LEVEL`                      | String   | "info"                   | Must not be empty            |
@@ -21,34 +23,74 @@ The forward auth middleware can be configured using environment variables or a `
 | `OAUTH_REDIRECT_URI`             | String   |                          | Must not be empty            |
 | `OAUTH_PROVIDER_AUTH_URL`        | String   |                          | Must not be empty            |
 | `OAUTH_PROVIDER_TOKEN_URL`       | String   |                          | Must not be empty            |
-| `OAUTH_PROVIDER_DEVICE_AUTH_URL` | String   |                          | Must not be empty            |
+| `OAUTH_PROVIDER_DEVICE_AUTH_URL` | String   |                          |                              |
 | `OAUTH_SCOPES`                   | String   |                          | Must not be empty            |
 | `ALLOWED_GITHUB_TEAMS`           | String[] |                          |                              |
+| `ADMIN_GITHUB_TEAMS`             | String[] |                          |                              |
 | `CREATE_JWT`                     | Boolean  | false                    |                              |
 | `JWT_ALGORITHM`                  | String   | "RS512"                  |                              |
 | `JWT_PRIVATE_KEY`                | String   |                          | Sensitive                    |
 | `JWT_ISSUER`                     | String   |                          |                              |
-| `API_KEYS`                       | String   | ""                       | Sensitive                    |
+| `API_KEYS`                       | String[] | ""                       | Sensitive                    |
 | `COOKIE_DOMAIN`                  | String   | "localhost"              | Must not be empty            |
+| `COOKIE_INSECURE`                | Boolean  | false                    | Set true only for local dev  |
 | `SESSION_COOKIE_NAME`            | String   | "session_id"             | Must not be empty            |
-| `SESSION_MAX_AGE`                | Integer  | 604800                   | (3600 _ 24 _ 7) - 1 week     |
-| `SESSION_STORAGE_BACKEND`        | String   | "memory"                 | Must not be empty            |
+| `SESSION_MAX_AGE`                | Integer  | 604800                   | (3600 * 24 * 7) - 1 week    |
+| `SESSION_SECRET_KEY`             | String   |                          | Must not be empty, Sensitive, Base64-encoded 64-byte key |
+| `SESSION_ENCRYPTION_KEY`         | String   |                          | Must not be empty, Sensitive, Base64-encoded 32-byte key |
+
+### Session Keys
+
+The middleware uses encrypted session cookies. You must provide two keys:
+
+- `SESSION_SECRET_KEY` - A base64-encoded 64-byte key for HMAC-SHA512 cookie signing
+- `SESSION_ENCRYPTION_KEY` - A base64-encoded 32-byte key for AES-256 cookie encryption
+
+Generate keys using the library helpers or any method that produces cryptographically random bytes:
+
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/mxcd/github-fwd-auth/pkg/githuboauth"
+)
+
+func main() {
+    secret, _ := githuboauth.GenerateSessionSecretKey()
+    encryption, _ := githuboauth.GenerateSessionEncryptionKey()
+    fmt.Println("SESSION_SECRET_KEY=" + githuboauth.EncodeKeyToBase64(secret))
+    fmt.Println("SESSION_ENCRYPTION_KEY=" + githuboauth.EncodeKeyToBase64(encryption))
+}
+```
+
+Or using `openssl`:
+
+```bash
+echo "SESSION_SECRET_KEY=$(openssl rand -base64 64)"
+echo "SESSION_ENCRYPTION_KEY=$(openssl rand -base64 32)"
+```
 
 ### JWT Configuration
 
-Only if `CREATE_JWT` is set to `true`, a JWT will be created and injected into the `Authorization` header of the request.  
+Only if `CREATE_JWT` is set to `true`, a JWT will be created and injected into the `Authorization` header of the request.
 Note that the header needs to be allowed in `traefik` using the `traefik.http.middlewares.ui-fwd-auth.forwardauth.authResponseHeaders=Authorization` directive
 
 ### API Keys
 
-The provided `API_KEYS` can be used to bypass the GitHub OAuth authentication. When handling a request, the middleware will check the `X-API-KEY` header and compare it to the provided `API_KEYS`. If the `X-API-KEY` matches any of the `API_KEYS`, the request will be allowed to pass through.  
-The `API_KEYS` are comma separated, e.g. `API_KEYS=123456,789012` which would result in the valid API keys `123456` and `789012`.  
+The provided `API_KEYS` can be used to bypass the GitHub OAuth authentication. When handling a request, the middleware will check the `X-API-Key` header (or `Authorization: Bearer <key>`) and compare it to the provided `API_KEYS`. If the key matches any of the `API_KEYS`, the request will be allowed to pass through.
+The `API_KEYS` are comma separated, e.g. `API_KEYS=123456,789012` which would result in the valid API keys `123456` and `789012`.
 If no `API_KEYS` are provided, the API key check will be disabled.
 
 ### Allowed Teams
 
-It is possible to restrict access to users that are members of specific GitHub teams. The `ALLOWED_GITHUB_TEAMS` environment variable can be used to provide a list of team names that are allowed to pass through. If no teams are provided, all users are allowed to pass through.  
+It is possible to restrict access to users that are members of specific GitHub teams. The `ALLOWED_GITHUB_TEAMS` environment variable can be used to provide a list of team names that are allowed to pass through. If no teams are provided, all users are allowed to pass through.
 The format of the team name is the entire slug, e.g. `my-org/my-team`. Multiple teams can be provided as a comma separated list, e.g. `ALLOWED_GITHUB_TEAMS=my-org/my-team,my-org/my-other-team`.
+
+### Admin Teams
+
+The `ADMIN_GITHUB_TEAMS` environment variable can be used to designate teams with admin privileges. Admin status can be checked by downstream services via the JWT claims or user info endpoint.
+The format is the same as `ALLOWED_GITHUB_TEAMS`, e.g. `ADMIN_GITHUB_TEAMS=my-org/platform-admins`.
 
 ## Traefik Setup
 
@@ -95,8 +137,9 @@ OAUTH_CLIENT_SECRET=<INSERT CLIENT SECRET>
 OAUTH_REDIRECT_URI=http://localhost:8080/auth/callback
 OAUTH_PROVIDER_AUTH_URL=https://github.com/login/oauth/authorize
 OAUTH_PROVIDER_TOKEN_URL=https://github.com/login/oauth/access_token
-OAUTH_PROVIDER_DEVICE_AUTH_URL=https://github.com/login/device/code
 OAUTH_SCOPES="user:email,read:org"
+SESSION_SECRET_KEY=<BASE64 ENCODED 64 BYTE KEY>
+SESSION_ENCRYPTION_KEY=<BASE64 ENCODED 32 BYTE KEY>
 ```
 
 ### Kubernetes example
@@ -149,3 +192,9 @@ spec:
                 port:
                   number: 80
 ```
+
+## Library Usage
+
+The GitHub OAuth functionality is available as a reusable Go library at `pkg/githuboauth`. Use it to add GitHub OAuth authentication to your own Gin applications without the forward auth server.
+
+See the [library documentation](pkg/githuboauth/README.md) for the full API reference, configuration options, and usage examples.
