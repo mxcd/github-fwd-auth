@@ -33,7 +33,7 @@ func hashAPIKey(key string) [sha256.Size]byte {
 // and false if no API key was provided (allowing the next auth method to run).
 // F-02: The contextKey parameter is a random string generated at Init() time,
 // preventing external middleware from spoofing API key authentication.
-func getApiKeyFunction(allowedApiKeys []string, contextKey string) func(*gin.Context) bool {
+func getApiKeyFunction(allowedApiKeys []string, contextKey string, isAuthenticatedContextKey string) func(*gin.Context) bool {
 	// Pre-hash all valid keys at initialization time
 	hashedKeys := make([][sha256.Size]byte, len(allowedApiKeys))
 	for i, key := range allowedApiKeys {
@@ -60,6 +60,7 @@ func getApiKeyFunction(allowedApiKeys []string, contextKey string) func(*gin.Con
 				// ConstantTimeCompare never leaks the original key length.
 				if subtle.ConstantTimeCompare(inputHash[:], validHash[:]) == 1 {
 					c.Set(contextKey, true)
+					c.Set(isAuthenticatedContextKey, true)
 					c.Next()
 					return true
 				}
@@ -81,7 +82,8 @@ func getApiKeyFunction(allowedApiKeys []string, contextKey string) func(*gin.Con
 // API keys are pre-hashed once at initialization, not per-request.
 func GetApiKeyAuthMiddleware(allowedApiKeys []string) gin.HandlerFunc {
 	contextKey := generateContextKey()
-	handler := getApiKeyFunction(allowedApiKeys, contextKey)
+	isAuthenticatedKey := generateContextKey()
+	handler := getApiKeyFunction(allowedApiKeys, contextKey, isAuthenticatedKey)
 	return func(c *gin.Context) {
 		handled := handler(c)
 		if !handled {

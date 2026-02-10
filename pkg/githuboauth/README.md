@@ -121,6 +121,7 @@ encryptionKey, err := githuboauth.DecodeKeyFromBase64(os.Getenv("SESSION_ENCRYPT
 | `DeviceAuthURL` | `string` | `""` | Device authorization endpoint |
 | `GitHubAPIBaseURL` | `string` | `https://api.github.com` | GitHub API URL (set for GHE, must be HTTPS) |
 | `AdminTeams` | `[]string` | `[]` | Teams with admin privileges |
+| `RelevantTeams` | `[]string` | `[]` | Teams to expose on Gin context for downstream authorization |
 | `AllowedAPIKeys` | `[]string` | `[]` | API keys for non-OAuth authentication |
 | `CookieName` | `string` | `session_id` | Session cookie name |
 | `CookieDomain` | `string` | `localhost` | Cookie domain |
@@ -158,6 +159,43 @@ Responses:
 - `401` if no valid session
 - `403` if authenticated but not in an admin team
 - Proceeds if user is an admin or request is API key-authenticated
+
+## Auth Context
+
+After successful authentication the middleware sets `isAuthenticated`, `isAdmin`, and the matching `RelevantTeams` on the Gin context. Read them via the `Handle` methods:
+
+```go
+handle, _ := githuboauth.Init(router, &githuboauth.Config{
+    // ...
+    RelevantTeams: []string{"myorg/backend", "myorg/frontend", "myorg/devops"},
+})
+
+router.GET("/api/resource", func(c *gin.Context) {
+    // true for both OAuth sessions and valid API keys
+    if !handle.IsAuthenticated(c) {
+        return
+    }
+
+    // true when the user belongs to any configured AdminTeams
+    // (always false for API key requests)
+    if handle.IsAdmin(c) {
+        // admin-only logic
+    }
+
+    // subset of RelevantTeams the user is a member of
+    // e.g. ["myorg/backend", "myorg/devops"]
+    teams := handle.GetRelevantTeams(c)
+    for _, t := range teams {
+        // fine-grained authorization per team
+    }
+})
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `handle.IsAuthenticated(c)` | `bool` | `true` if the request passed auth (OAuth session or API key) |
+| `handle.IsAdmin(c)` | `bool` | `true` if the user is in any `AdminTeams` team |
+| `handle.GetRelevantTeams(c)` | `[]string` | Configured `RelevantTeams` the user belongs to |
 
 ## Working with Sessions
 

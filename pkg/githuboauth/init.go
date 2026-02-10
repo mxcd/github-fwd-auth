@@ -35,6 +35,12 @@ type Config struct {
 	AllowedTeams []string // at least one required
 	AdminTeams   []string // optional
 
+	// Relevant teams for context enrichment (optional).
+	// When configured, the middleware sets matching team slugs on the Gin context
+	// for downstream handlers to perform fine-grained authorization.
+	// Teams are specified in "org/team-slug" format (case-insensitive).
+	RelevantTeams []string
+
 	// API key authentication (optional fallback).
 	// Requests with a valid API key bypass OAuth.
 	AllowedAPIKeys []string
@@ -70,11 +76,52 @@ type Handle struct {
 	handler      *oauthHandler
 	sessionStore *SessionStore
 	connector    *GitHubConnector
+	// Context keys for reading auth state set by middleware
+	isAuthenticatedContextKey string
+	isAdminContextKey         string
+	relevantTeamsContextKey   string
 }
 
 // IsUserAdmin checks if the given teams include any admin team.
 func (h *Handle) IsUserAdmin(teams *[]Team) bool {
 	return h.handler.isUserAdmin(teams)
+}
+
+// IsAuthenticated returns true if the current request was authenticated
+// by the OAuth middleware (via session or API key).
+func (h *Handle) IsAuthenticated(c *gin.Context) bool {
+	v, exists := c.Get(h.isAuthenticatedContextKey)
+	if !exists {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+// IsAdmin returns true if the authenticated user is a member of any admin team.
+// For API key authenticated requests this returns false (no user context).
+func (h *Handle) IsAdmin(c *gin.Context) bool {
+	v, exists := c.Get(h.isAdminContextKey)
+	if !exists {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+// GetRelevantTeams returns the subset of configured RelevantTeams that the
+// authenticated user is a member of. Returns nil for API key authenticated
+// requests or when no RelevantTeams are configured.
+func (h *Handle) GetRelevantTeams(c *gin.Context) []string {
+	v, exists := c.Get(h.relevantTeamsContextKey)
+	if !exists {
+		return nil
+	}
+	teams, ok := v.([]string)
+	if !ok {
+		return nil
+	}
+	return teams
 }
 
 // GetSessionStore returns the session store.
@@ -192,6 +239,9 @@ func newHandle(cfg *Config) (*Handle, error) {
 	for i, t := range cfg.AdminTeams {
 		cfg.AdminTeams[i] = strings.ToLower(t)
 	}
+	for i, t := range cfg.RelevantTeams {
+		cfg.RelevantTeams[i] = strings.ToLower(t)
+	}
 
 	// Apply defaults
 	if cfg.GitHubAPIBaseURL == "" {
@@ -300,33 +350,43 @@ func newHandle(cfg *Config) (*Handle, error) {
 
 	// F-02: Generate random context key for API key authentication
 	apiKeyContextKey := generateContextKey()
+	isAuthenticatedContextKey := generateContextKey()
+	isAdminContextKey := generateContextKey()
+	relevantTeamsContextKey := generateContextKey()
 
 	var apiKeyHandler func(*gin.Context) bool
 	if len(cfg.AllowedAPIKeys) > 0 {
-		apiKeyHandler = getApiKeyFunction(cfg.AllowedAPIKeys, apiKeyContextKey)
+		apiKeyHandler = getApiKeyFunction(cfg.AllowedAPIKeys, apiKeyContextKey, isAuthenticatedContextKey)
 	}
 
 	handler, err := newOAuthHandler(&oauthHandlerConfig{
-		oauthConfig:      oauthConfig,
-		gitHubConnector:  connector,
-		allowedTeams:     cfg.AllowedTeams,
-		adminTeams:       cfg.AdminTeams,
-		apiKeyHandler:    apiKeyHandler,
-		cookieSecure:     cookieSecure,
-		loginPath:        cfg.LoginPath,
-		callbackPath:     cfg.CallbackPath,
-		userInfoPath:     cfg.UserInfoPath,
-		logoutPath:       cfg.LogoutPath,
-		refreshTeamsPath: cfg.RefreshTeamsPath,
-		apiKeyContextKey: apiKeyContextKey,
+		oauthConfig:               oauthConfig,
+		gitHubConnector:           connector,
+		allowedTeams:              cfg.AllowedTeams,
+		adminTeams:                cfg.AdminTeams,
+		relevantTeams:             cfg.RelevantTeams,
+		apiKeyHandler:             apiKeyHandler,
+		cookieSecure:              cookieSecure,
+		loginPath:                 cfg.LoginPath,
+		callbackPath:              cfg.CallbackPath,
+		userInfoPath:              cfg.UserInfoPath,
+		logoutPath:                cfg.LogoutPath,
+		refreshTeamsPath:          cfg.RefreshTeamsPath,
+		apiKeyContextKey:          apiKeyContextKey,
+		isAuthenticatedContextKey: isAuthenticatedContextKey,
+		isAdminContextKey:         isAdminContextKey,
+		relevantTeamsContextKey:   relevantTeamsContextKey,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return &Handle{
-		handler:      handler,
-		sessionStore: sessionStore,
-		connector:    connector,
+		handler:                   handler,
+		sessionStore:              sessionStore,
+		connector:                 connector,
+		isAuthenticatedContextKey: isAuthenticatedContextKey,
+		isAdminContextKey:         isAdminContextKey,
+		relevantTeamsContextKey:   relevantTeamsContextKey,
 	}, nil
 }

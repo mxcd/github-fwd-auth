@@ -24,6 +24,7 @@ type oauthHandlerConfig struct {
 	gitHubConnector  *GitHubConnector
 	allowedTeams     []string
 	adminTeams       []string
+	relevantTeams    []string
 	apiKeyHandler    func(*gin.Context) bool
 	cookieSecure     bool
 	loginPath        string
@@ -32,7 +33,10 @@ type oauthHandlerConfig struct {
 	logoutPath       string
 	refreshTeamsPath string
 	// F-02: Random context key for API key authentication, generated per Init()
-	apiKeyContextKey string
+	apiKeyContextKey          string
+	isAuthenticatedContextKey string
+	isAdminContextKey         string
+	relevantTeamsContextKey   string
 }
 
 type oauthHandler struct {
@@ -80,6 +84,20 @@ func (h *oauthHandler) isUserAdmin(teams *[]Team) bool {
 		}
 	}
 	return false
+}
+
+func (h *oauthHandler) getRelevantTeams(teams *[]Team) []string {
+	if teams == nil || len(h.config.relevantTeams) == 0 {
+		return nil
+	}
+	teamSlugs := GetTeamSlugs(teams)
+	var relevant []string
+	for _, rt := range h.config.relevantTeams {
+		if slices.Contains(teamSlugs, rt) {
+			relevant = append(relevant, rt)
+		}
+	}
+	return relevant
 }
 
 func (h *oauthHandler) getLoginHandler(s *SessionStore) gin.HandlerFunc {
@@ -238,11 +256,18 @@ func (h *oauthHandler) getAuthHandler(s *SessionStore) gin.HandlerFunc {
 			return false
 		}
 
+		setAuthContext := func() {
+			c.Set(h.config.isAuthenticatedContextKey, true)
+			c.Set(h.config.isAdminContextKey, h.isUserAdmin(sess.UserInformation.Teams))
+			c.Set(h.config.relevantTeamsContextKey, h.getRelevantTeams(sess.UserInformation.Teams))
+		}
+
 		if checkForAllowedTeam() {
 			// F-08: Clear negative cache entry if user is now authorized
 			if sess.sessionID != "" {
 				h.deniedSessionCache.Remove(sess.sessionID)
 			}
+			setAuthContext()
 			c.Next()
 			return
 		}
@@ -269,6 +294,7 @@ func (h *oauthHandler) getAuthHandler(s *SessionStore) gin.HandlerFunc {
 		log.Trace().Msg("re-checking if user is member of allowed teams")
 		if checkForAllowedTeam() {
 			log.Trace().Msg("user is member of allowed teams. pass")
+			setAuthContext()
 			c.Next()
 			return
 		}
