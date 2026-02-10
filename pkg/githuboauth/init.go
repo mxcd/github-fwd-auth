@@ -1,0 +1,332 @@
+package githuboauth
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog/log"
+	"golang.org/x/oauth2"
+)
+
+// Config holds all configuration needed to initialize GitHub OAuth.
+type Config struct {
+	// OAuth2 settings
+	ClientID     string
+	ClientSecret string
+	RedirectURI  string
+	Scopes       []string
+	AuthURL      string // e.g. https://github.com/login/oauth/authorize
+	TokenURL     string // e.g. https://github.com/login/oauth/access_token
+	DeviceAuthURL string // optional
+
+	// GitHub API base URL. Defaults to https://api.github.com.
+	// Must use HTTPS. Set this to your GitHub Enterprise API URL for GHE support,
+	// e.g. https://github.example.com/api/v3
+	GitHubAPIBaseURL string
+
+	// Team-based authorization.
+	// Teams are specified in "org/team-slug" format (case-insensitive).
+	AllowedTeams []string // at least one required
+	AdminTeams   []string // optional
+
+	// API key authentication (optional fallback).
+	// Requests with a valid API key bypass OAuth.
+	AllowedAPIKeys []string
+
+	// Session cookie encryption keys.
+	// SecretKey must be 64 bytes (for HMAC-SHA512 signing).
+	// EncryptionKey must be 32 bytes (for AES-256 encryption).
+	SessionSecretKey     []byte
+	SessionEncryptionKey []byte
+
+	// Session cookie settings.
+	CookieName   string // defaults to "session_id"
+	CookieDomain string // defaults to "localhost"
+
+	// F-N: SessionMaxAge as pointer to distinguish "not set" (nil -> default 7 days)
+	// from explicitly zero (0 -> session cookie, expires on browser close).
+	SessionMaxAge *int // seconds, nil defaults to 604800 (7 days)
+
+	// F-05: CookieSecure defaults to true (safe-by-default).
+	// Set CookieInsecure to true ONLY for local development without HTTPS.
+	CookieInsecure bool
+
+	// Route paths (optional, defaults shown).
+	LoginPath        string // defaults to /auth/login
+	CallbackPath     string // defaults to /auth/callback
+	UserInfoPath     string // defaults to /auth/userinfo
+	LogoutPath       string // defaults to /auth/logout
+	RefreshTeamsPath string // defaults to /auth/refresh-teams
+}
+
+// Handle provides access to the initialized OAuth system.
+type Handle struct {
+	handler      *oauthHandler
+	sessionStore *SessionStore
+	connector    *GitHubConnector
+}
+
+// IsUserAdmin checks if the given teams include any admin team.
+func (h *Handle) IsUserAdmin(teams *[]Team) bool {
+	return h.handler.isUserAdmin(teams)
+}
+
+// GetSessionStore returns the session store.
+func (h *Handle) GetSessionStore() *SessionStore {
+	return h.sessionStore
+}
+
+// GetGitHubConnector returns the GitHub connector for making additional API calls.
+func (h *Handle) GetGitHubConnector() *GitHubConnector {
+	return h.connector
+}
+
+// GetAdminMiddleware returns a Gin middleware that restricts access to admin users.
+// Requests that were authenticated via a validated API key bypass the admin check.
+// OAuth users must be members of an admin team.
+func (h *Handle) GetAdminMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// F-02: Use random context key from handler config instead of guessable constant
+		if authenticated, exists := c.Get(h.handler.config.apiKeyContextKey); exists && authenticated == true {
+			log.Trace().Msg("admin middleware: request authenticated via valid API key, bypassing admin check")
+			c.Next()
+			return
+		}
+
+		sess, ok := h.sessionStore.GetSession(c)
+		if !ok {
+			log.Debug().Msg("admin middleware: no session found")
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"message": "unauthorized",
+				"code":    "unauthorized",
+			})
+			return
+		}
+
+		if sess.UserInformation == nil {
+			log.Debug().Msg("admin middleware: no user information in session")
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"message": "unauthorized",
+				"code":    "unauthorized",
+			})
+			return
+		}
+
+		if !h.handler.isUserAdmin(sess.UserInformation.Teams) {
+			log.Debug().Msg("admin middleware: user is not an admin")
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"message": "admin access required",
+				"code":    "forbidden",
+			})
+			return
+		}
+
+		log.Trace().Msg("admin middleware: user is admin, allowing access")
+		c.Next()
+	}
+}
+
+// GetMiddleware returns the middleware chain for manual route registration.
+// Use this when you need to apply the OAuth middleware to specific routes
+// rather than globally via Init().
+func (h *Handle) GetMiddleware() gin.HandlersChain {
+	return h.handler.getHandlersChain(h.sessionStore)
+}
+
+// New creates a Handle without registering middleware on any engine.
+// Use GetMiddleware() to obtain the middleware chain for manual registration.
+func New(cfg *Config) (*Handle, error) {
+	return newHandle(cfg)
+}
+
+// Init registers all OAuth routes and middleware on the provided gin.Engine.
+// It returns a Handle for querying auth state (admin checks, session access, etc.).
+func Init(engine *gin.Engine, cfg *Config) (*Handle, error) {
+	h, err := newHandle(cfg)
+	if err != nil {
+		return nil, err
+	}
+	engine.Use(h.GetMiddleware()...)
+	return h, nil
+}
+
+func newHandle(cfg *Config) (*Handle, error) {
+	// Validate required fields
+	if cfg.ClientID == "" {
+		return nil, errors.New("ClientID is required")
+	}
+	if cfg.ClientSecret == "" {
+		return nil, errors.New("ClientSecret is required")
+	}
+	if cfg.RedirectURI == "" {
+		return nil, errors.New("RedirectURI is required")
+	}
+	if cfg.AuthURL == "" {
+		return nil, errors.New("AuthURL is required")
+	}
+	if cfg.TokenURL == "" {
+		return nil, errors.New("TokenURL is required")
+	}
+
+	// F-17: Warn if scopes don't include read:org (needed for team fetching)
+	if len(cfg.Scopes) == 0 {
+		log.Warn().Msg("no OAuth scopes configured; read:org is typically required for team-based authorization")
+	}
+
+	// F-05: CookieSecure defaults to true; CookieInsecure is the explicit opt-out
+	cookieSecure := !cfg.CookieInsecure
+	if cfg.CookieInsecure {
+		log.Warn().Msg("CookieInsecure is true: session cookies will be sent over plain HTTP. This is insecure for production use.")
+	}
+
+	// F-07: Normalize team lists to lowercase for case-insensitive comparison
+	for i, t := range cfg.AllowedTeams {
+		cfg.AllowedTeams[i] = strings.ToLower(t)
+	}
+	for i, t := range cfg.AdminTeams {
+		cfg.AdminTeams[i] = strings.ToLower(t)
+	}
+
+	// Apply defaults
+	if cfg.GitHubAPIBaseURL == "" {
+		cfg.GitHubAPIBaseURL = "https://api.github.com"
+	}
+	if cfg.CookieName == "" {
+		cfg.CookieName = "session_id"
+	}
+	if cfg.CookieDomain == "" {
+		cfg.CookieDomain = "localhost"
+	}
+	// F-N: Distinguish nil (use default) from explicit 0 (session cookie)
+	sessionMaxAge := 604800 // 7 days default
+	if cfg.SessionMaxAge != nil {
+		sessionMaxAge = *cfg.SessionMaxAge
+	}
+	if cfg.LoginPath == "" {
+		cfg.LoginPath = "/auth/login"
+	}
+	if cfg.CallbackPath == "" {
+		cfg.CallbackPath = "/auth/callback"
+	}
+	if cfg.UserInfoPath == "" {
+		cfg.UserInfoPath = "/auth/userinfo"
+	}
+	if cfg.LogoutPath == "" {
+		cfg.LogoutPath = "/auth/logout"
+	}
+	if cfg.RefreshTeamsPath == "" {
+		cfg.RefreshTeamsPath = "/auth/refresh-teams"
+	}
+
+	log.Info().Msg("initializing GitHub OAuth middleware")
+
+	oauthConfig := &oauth2.Config{
+		RedirectURL:  cfg.RedirectURI,
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		Scopes:       cfg.Scopes,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:       cfg.AuthURL,
+			TokenURL:      cfg.TokenURL,
+			DeviceAuthURL: cfg.DeviceAuthURL,
+			AuthStyle:     oauth2.AuthStyleInParams,
+		},
+	}
+
+	sessionStore, err := NewSessionStore(&SessionStoreOptions{
+		SecretKey:     cfg.SessionSecretKey,
+		EncryptionKey: cfg.SessionEncryptionKey,
+		OAuthConfig:   oauthConfig,
+		CookieName:    cfg.CookieName,
+		CookieDomain:  cfg.CookieDomain,
+		CookieSecure:  cookieSecure,
+		MaxAge:        sessionMaxAge,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// F-07: Configure best-effort token revocation on logout.
+	// Uses GitHub's DELETE /applications/{client_id}/token endpoint with Basic auth.
+	apiBaseURL := cfg.GitHubAPIBaseURL
+	clientID := cfg.ClientID
+	clientSecret := cfg.ClientSecret
+	sessionStore.onLogout = func(token *oauth2.Token) {
+		if token == nil || token.AccessToken == "" {
+			return
+		}
+		revokeURL, err := url.JoinPath(apiBaseURL, "applications", clientID, "token")
+		if err != nil {
+			log.Error().Err(err).Msg("failed to construct token revocation URL")
+			return
+		}
+		body, _ := json.Marshal(map[string]string{"access_token": token.AccessToken})
+		req, err := http.NewRequest(http.MethodDelete, revokeURL, bytes.NewReader(body))
+		if err != nil {
+			log.Error().Err(err).Msg("failed to create token revocation request")
+			return
+		}
+		req.SetBasicAuth(clientID, clientSecret)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to revoke OAuth token")
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+			log.Debug().Msg("successfully revoked GitHub OAuth token")
+		} else {
+			log.Warn().Int("status", resp.StatusCode).Msg("unexpected status from token revocation")
+		}
+	}
+
+	// F-03: NewGitHubConnector now validates the URL and returns an error
+	connector, err := NewGitHubConnector(&GitHubConnectorConfig{
+		ApiBaseURL: cfg.GitHubAPIBaseURL,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// F-02: Generate random context key for API key authentication
+	apiKeyContextKey := generateContextKey()
+
+	var apiKeyHandler func(*gin.Context) bool
+	if len(cfg.AllowedAPIKeys) > 0 {
+		apiKeyHandler = getApiKeyFunction(cfg.AllowedAPIKeys, apiKeyContextKey)
+	}
+
+	handler, err := newOAuthHandler(&oauthHandlerConfig{
+		oauthConfig:      oauthConfig,
+		gitHubConnector:  connector,
+		allowedTeams:     cfg.AllowedTeams,
+		adminTeams:       cfg.AdminTeams,
+		apiKeyHandler:    apiKeyHandler,
+		cookieSecure:     cookieSecure,
+		loginPath:        cfg.LoginPath,
+		callbackPath:     cfg.CallbackPath,
+		userInfoPath:     cfg.UserInfoPath,
+		logoutPath:       cfg.LogoutPath,
+		refreshTeamsPath: cfg.RefreshTeamsPath,
+		apiKeyContextKey: apiKeyContextKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &Handle{
+		handler:      handler,
+		sessionStore: sessionStore,
+		connector:    connector,
+	}, nil
+}

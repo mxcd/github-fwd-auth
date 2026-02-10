@@ -1,5 +1,8 @@
 github-fwd-auth.env
 
+server
+!cmd/server
+
 # Created by https://www.toptal.com/developers/gitignore/api/go,visualstudiocode,intellij+all
 # Edit at https://www.toptal.com/developers/gitignore?templates=go,visualstudiocode,intellij+all
 

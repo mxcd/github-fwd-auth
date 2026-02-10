@@ -12,6 +12,19 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: pkg/githuboauth/go.mod
+      - name: Run library tests
+        working-directory: pkg/githuboauth
+        run: go test -v -race -count=1 ./...
+      - name: Build main module
+        run: go build ./cmd/server/
+
   release:
     name: Create release
     permissions: write-all
@@ -34,6 +47,7 @@ jobs:
           prerelease: false
 
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions: write-all
     env:

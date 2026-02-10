@@ -1,10 +1,14 @@
-package github
+package githuboauth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 )
@@ -116,21 +120,40 @@ type UserInformation struct {
 }
 
 type GitHubConnector struct {
-	config *GitHubConnectorConfig
+	apiBaseURL string
 }
 
 type GitHubConnectorConfig struct {
-	ApiBaseUrl string
+	ApiBaseURL string
 }
 
-func NewGitHubConnector(config *GitHubConnectorConfig) *GitHubConnector {
-	return &GitHubConnector{
-		config: config,
+// NewGitHubConnector creates a new GitHubConnector with URL validation.
+// The API base URL must use HTTPS to prevent credential leakage.
+func NewGitHubConnector(config *GitHubConnectorConfig) (*GitHubConnector, error) {
+	apiBaseURL := config.ApiBaseURL
+	if apiBaseURL == "" {
+		apiBaseURL = "https://api.github.com"
 	}
+
+	// F-03: Validate URL to prevent SSRF
+	u, err := url.Parse(apiBaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid GitHub API base URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("GitHub API base URL must use HTTPS, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("GitHub API base URL must include a host")
+	}
+
+	return &GitHubConnector{
+		apiBaseURL: strings.TrimRight(apiBaseURL, "/"),
+	}, nil
 }
 
-func (g *GitHubConnector) GetUserProfile(client *http.Client) (*UserProfile, error) {
-	body, err := g.doGetRequest(client, "/user")
+func (g *GitHubConnector) GetUserProfile(ctx context.Context, client *http.Client) (*UserProfile, error) {
+	body, err := g.doGetRequest(ctx, client, "/user")
 	if err != nil {
 		return nil, err
 	}
@@ -144,28 +167,46 @@ func (g *GitHubConnector) GetUserProfile(client *http.Client) (*UserProfile, err
 	return &userProfile, nil
 }
 
-func (g *GitHubConnector) GetUserTeams(client *http.Client) (*[]Team, error) {
-	body, err := g.doGetRequest(client, "/user/teams")
-	if err != nil {
-		return nil, err
-	}
+// F-A: Paginate through all pages of /user/teams to avoid missing teams
+// when a user belongs to >30 teams (GitHub default page size).
+func (g *GitHubConnector) GetUserTeams(ctx context.Context, client *http.Client) (*[]Team, error) {
+	var allTeams []Team
+	page := 1
+	for {
+		body, err := g.doGetRequest(ctx, client, "/user/teams", map[string]string{
+			"per_page": "100",
+			"page":     strconv.Itoa(page),
+		})
+		if err != nil {
+			return nil, err
+		}
 
-	var teams []Team
-	err = json.Unmarshal(body, &teams)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to unmarshal teams")
-		return nil, err
+		var teams []Team
+		if err := json.Unmarshal(body, &teams); err != nil {
+			log.Error().Err(err).Msg("failed to unmarshal teams")
+			return nil, err
+		}
+		allTeams = append(allTeams, teams...)
+		if len(teams) < 100 {
+			break
+		}
+		page++
+		// Safety cap to prevent infinite loops against misbehaving APIs
+		if page > 50 {
+			log.Warn().Msg("team pagination exceeded 50 pages, stopping")
+			break
+		}
 	}
-	return &teams, nil
+	return &allTeams, nil
 }
 
-func (g *GitHubConnector) GetUserInformation(client *http.Client) (*UserInformation, error) {
-	userProfile, err := g.GetUserProfile(client)
+func (g *GitHubConnector) GetUserInformation(ctx context.Context, client *http.Client) (*UserInformation, error) {
+	userProfile, err := g.GetUserProfile(ctx, client)
 	if err != nil {
 		return nil, err
 	}
 
-	teams, err := g.GetUserTeams(client)
+	teams, err := g.GetUserTeams(ctx, client)
 	if err != nil {
 		return nil, err
 	}
@@ -176,9 +217,32 @@ func (g *GitHubConnector) GetUserInformation(client *http.Client) (*UserInformat
 	}, nil
 }
 
-func (g *GitHubConnector) doGetRequest(client *http.Client, path string) ([]byte, error) {
-	requestURL := g.config.ApiBaseUrl + path
-	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+// F-D: Accept context and use http.NewRequestWithContext to propagate
+// cancellation to outbound GitHub API calls.
+func (g *GitHubConnector) doGetRequest(ctx context.Context, client *http.Client, path string, queryParams ...map[string]string) ([]byte, error) {
+	// F-03: Use url.JoinPath instead of string concatenation to prevent path injection.
+	// Query parameters must be passed separately to avoid url.JoinPath encoding '?' as '%3F'.
+	requestURL, err := url.JoinPath(g.apiBaseURL, path)
+	if err != nil {
+		log.Error().Err(err).Str("base", g.apiBaseURL).Str("path", path).Msg("failed to construct request URL")
+		return nil, fmt.Errorf("failed to construct request URL: %w", err)
+	}
+
+	// Append query parameters properly via url.Values
+	if len(queryParams) > 0 && len(queryParams[0]) > 0 {
+		u, err := url.Parse(requestURL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse request URL: %w", err)
+		}
+		q := u.Query()
+		for k, v := range queryParams[0] {
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+		requestURL = u.String()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		log.Error().Err(err).Str("request url", requestURL).Msg("failed to create http request")
 		return nil, err
@@ -192,25 +256,35 @@ func (g *GitHubConnector) doGetRequest(client *http.Client, path string) ([]byte
 		log.Error().Err(err).Str("request url", requestURL).Msg("failed to execute http request")
 		return nil, err
 	}
+	defer res.Body.Close()
 
-	body, err := io.ReadAll(res.Body)
+	// F-04: Check status code before reading full body to avoid wasting memory on error responses
+	if res.StatusCode != http.StatusOK {
+		// Read limited error body for logging context
+		errBody, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+		log.Error().Int("status", res.StatusCode).Str("request url", requestURL).Str("body", string(errBody)).Msg("http response status not ok")
+		return nil, fmt.Errorf("http response status not ok: %d", res.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(res.Body, 10<<20))
 	if err != nil {
 		log.Error().Err(err).Str("request url", requestURL).Msg("failed to read http response body")
 		return nil, err
 	}
 
-	if res.StatusCode != http.StatusOK {
-		log.Error().Err(err).Int("status", res.StatusCode).Str("request url", requestURL).Msg("http response status not ok")
-		return nil, fmt.Errorf("http response status not ok")
-	}
-
 	return body, nil
 }
 
+// GetTeamSlugs returns team slugs in "org/team-slug" format, normalized to lowercase.
+// F-07: Case-insensitive comparison — GitHub slugs are case-insensitive.
+// F-08: Nil-safe — returns nil if teams is nil.
 func GetTeamSlugs(teams *[]Team) []string {
+	if teams == nil {
+		return nil
+	}
 	slugs := make([]string, len(*teams))
 	for i, team := range *teams {
-		slugs[i] = team.Organization.Login + "/" + team.Slug
+		slugs[i] = strings.ToLower(team.Organization.Login + "/" + team.Slug)
 	}
 	return slugs
 }

@@ -15,10 +15,11 @@ func InitConfig() error {
 		config.String("OAUTH_REDIRECT_URI").NotEmpty(),
 		config.String("OAUTH_PROVIDER_AUTH_URL").NotEmpty(),
 		config.String("OAUTH_PROVIDER_TOKEN_URL").NotEmpty(),
-		config.String("OAUTH_PROVIDER_DEVICE_AUTH_URL").NotEmpty(),
+		config.String("OAUTH_PROVIDER_DEVICE_AUTH_URL"),
 		config.String("OAUTH_SCOPES").NotEmpty(),
 
 		config.StringArray("ALLOWED_GITHUB_TEAMS").Default([]string{}),
+		config.StringArray("ADMIN_GITHUB_TEAMS").Default([]string{}),
 
 		config.Bool("CREATE_JWT").Default(false),
 		config.String("JWT_ALGORITHM").Default("RS512"),
@@ -29,9 +30,11 @@ func InitConfig() error {
 
 		config.String("BASE_URL").NotEmpty().Default("http://localhost:8080"),
 		config.String("COOKIE_DOMAIN").NotEmpty().Default("localhost"),
+		config.Bool("COOKIE_INSECURE").Default(false),
 		config.String("SESSION_COOKIE_NAME").NotEmpty().Default("session_id"),
 		config.Int("SESSION_MAX_AGE").Default(3600 * 24 * 7),
-		config.String("SESSION_STORAGE_BACKEND").NotEmpty().Default("memory"),
+		config.String("SESSION_SECRET_KEY").NotEmpty().Sensitive(),
+		config.String("SESSION_ENCRYPTION_KEY").NotEmpty().Sensitive(),
 	}, &config.LoadConfigOptions{
 		DotEnvFile: "github-fwd-auth.env",
 	})

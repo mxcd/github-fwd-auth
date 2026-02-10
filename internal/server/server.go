@@ -6,21 +6,16 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mxcd/github-fwd-auth/internal/oauth"
-	"github.com/mxcd/github-fwd-auth/internal/session"
-	"github.com/mxcd/github-fwd-auth/pkg/jwt"
-	"github.com/rs/zerolog/log"
-
 	"github.com/hashicorp/golang-lru/v2/expirable"
+
+	githuboauth "github.com/mxcd/github-fwd-auth/pkg/githuboauth"
+	"github.com/mxcd/github-fwd-auth/pkg/jwt"
 )
 
 type ServerOptions struct {
-	Port         int
-	ApiKeys      []string
-	AllowedTeams []string
-	JwtSigner    *jwt.Signer
-	OAuthHandler *oauth.OAuthHandler
-	SessionStore *session.SessionStore
+	Port        int
+	JwtSigner   *jwt.Signer
+	OAuthHandle *githuboauth.Handle
 }
 
 type Server struct {
@@ -30,15 +25,7 @@ type Server struct {
 	JwtCache   *expirable.LRU[string, string]
 }
 
-type FwdAuthType string
-
-const (
-	FwdAuthTypeUi  FwdAuthType = "ui"
-	FwdAuthTypeApi FwdAuthType = "api"
-)
-
 func NewServer(options *ServerOptions) *Server {
-
 	engine := gin.New()
 
 	s := &Server{
@@ -47,77 +34,49 @@ func NewServer(options *ServerOptions) *Server {
 		JwtCache: expirable.NewLRU[string, string](1000, nil, time.Minute),
 	}
 
+	// Unprotected routes
 	engine.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"status": "ok",
+		c.JSON(200, gin.H{"status": "ok"})
+	})
+
+	if options.JwtSigner != nil {
+		engine.GET("/JWKS", func(c *gin.Context) {
+			c.JSON(200, options.JwtSigner.Jwks)
 		})
-	})
+	}
 
-	engine.GET("/JWKS", func(c *gin.Context) {
-		c.JSON(200, s.Options.JwtSigner.Jwks)
-	})
+	// Forward auth routes with library middleware
+	// 1. Rewrite X-Forwarded-* headers to actual request properties
+	// 2. Library middleware handles: OAuth routes, session check, team validation, API keys
+	// 3. If auth passes, add JWT header and return 200
+	authMiddleware := options.OAuthHandle.GetMiddleware()
 
-	engine.GET("/ui-auth", func(c *gin.Context) {
-		log.Debug().Msg("ui-auth")
-		s.handleFwdAuth(c, FwdAuthTypeUi)
-	})
+	fwdAuthHandlers := make(gin.HandlersChain, 0, len(authMiddleware)+2)
+	fwdAuthHandlers = append(fwdAuthHandlers, rewriteRequestMiddleware())
+	fwdAuthHandlers = append(fwdAuthHandlers, authMiddleware...)
+	fwdAuthHandlers = append(fwdAuthHandlers, s.fwdAuthOK)
 
-	engine.GET("/api-auth", func(c *gin.Context) {
-		log.Debug().Msg("api-auth")
-		s.handleFwdAuth(c, FwdAuthTypeApi)
-	})
+	engine.GET("/ui-auth", fwdAuthHandlers...)
+	engine.GET("/api-auth", fwdAuthHandlers...)
 
 	s.HttpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", s.Options.Port),
+		Addr:    fmt.Sprintf(":%d", options.Port),
 		Handler: engine,
 	}
 
 	return s
 }
 
-func (s *Server) handleFwdAuth(c *gin.Context, fwdAuthType FwdAuthType) {
-	rewriteRequest(c)
-	LogForwardedHeaders(c)
-	LogRequest(c)
-
-	handled := s.handleApiKeyAuthentication(c)
-	if handled {
-		return
-	}
-
-	err, handled := s.Options.OAuthHandler.HandleOAuth(c)
-	if err != nil || handled {
-		return
-	}
-
-	if fwdAuthType == FwdAuthTypeUi {
-		err = s.Options.OAuthHandler.HandleUiAuthentication(c)
-	} else if fwdAuthType == FwdAuthTypeApi {
-		err = s.Options.OAuthHandler.HandleApiAuthentication(c)
-	} else {
-		log.Error().Msg("invalid fwd auth type")
-		c.Status(http.StatusInternalServerError)
-		return
-	}
-
-	if err != nil {
-		return
-	}
-
+// fwdAuthOK is the final handler: if we reach here, auth passed.
+// Add JWT header if configured, then return 200.
+func (s *Server) fwdAuthOK(c *gin.Context) {
 	if s.Options.JwtSigner != nil {
-		err = s.handleJwtAddition(c)
-		if err != nil {
+		if err := s.addJwtHeader(c); err != nil {
+			c.Status(http.StatusInternalServerError)
+			c.Writer.Write([]byte("failed to generate JWT"))
 			return
 		}
 	}
-
-	if len(s.Options.AllowedTeams) > 0 {
-		err = s.handleAllowedTeams(c)
-		if err != nil {
-			return
-		}
-	}
-
 	c.Status(http.StatusOK)
 }
 
