@@ -611,3 +611,40 @@ func TestCallbackHandler_GitHubAPIError(t *testing.T) {
 		t.Errorf("expected 500 for GitHub API error, got %d", w2.Code)
 	}
 }
+
+// Behind a forward-auth proxy (e.g. Traefik) the login redirect must be an
+// absolute URL: the proxy resolves relative Location headers against its own
+// upstream address, sending users to the cluster-internal service URL.
+func TestAuthHandler_BaseURL_AbsoluteLoginRedirect(t *testing.T) {
+	mock := newMockGitHubServer()
+	defer mock.close()
+
+	gin.SetMode(gin.TestMode)
+	cfg := mock.testConfig()
+	cfg.AllowedAPIKeys = nil
+	cfg.BaseURL = "https://public.example.com/" // trailing slash must be normalized
+	engine, _, err := setupTestRouter(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	w := performRequest(engine, http.MethodGet, "/protected", nil)
+
+	if w.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307, got %d", w.Code)
+	}
+	if got := w.Header().Get("Location"); got != "https://public.example.com/auth/login" {
+		t.Errorf("expected absolute login redirect, got %q", got)
+	}
+}
+
+func TestNew_InvalidBaseURL(t *testing.T) {
+	mock := newMockGitHubServer()
+	defer mock.close()
+
+	cfg := mock.testConfig()
+	cfg.BaseURL = "not-a-url"
+	if _, err := New(cfg); err == nil {
+		t.Error("expected error for relative BaseURL")
+	}
+}

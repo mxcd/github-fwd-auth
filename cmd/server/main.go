@@ -56,6 +56,7 @@ func main() {
 		TokenURL:             config.Get().String("OAUTH_PROVIDER_TOKEN_URL"),
 		DeviceAuthURL:        config.Get().String("OAUTH_PROVIDER_DEVICE_AUTH_URL"),
 		GitHubAPIBaseURL:     config.Get().String("GITHUB_API_BASE_URL"),
+		BaseURL:              config.Get().String("BASE_URL"),
 		AllowedTeams:         config.Get().StringArray("ALLOWED_GITHUB_TEAMS"),
 		AdminTeams:           config.Get().StringArray("ADMIN_GITHUB_TEAMS"),
 		AllowedAPIKeys:       config.Get().StringArray("API_KEYS"),

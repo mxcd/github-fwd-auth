@@ -127,6 +127,7 @@ encryptionKey, err := githuboauth.DecodeKeyFromBase64(os.Getenv("SESSION_ENCRYPT
 | `CookieDomain` | `string` | `localhost` | Cookie domain |
 | `SessionMaxAge` | `*int` | `nil` (7 days) | Cookie max age in seconds (`nil` = 7 days, `0` = session cookie) |
 | `CookieInsecure` | `bool` | `false` | Set `true` only for local dev without HTTPS |
+| `BaseURL` | `string` | `""` | Public base URL for absolute login redirects — required behind forward-auth proxies (e.g. Traefik forwardAuth) |
 | `LoginPath` | `string` | `/auth/login` | Login route path |
 | `CallbackPath` | `string` | `/auth/callback` | OAuth callback route path |
 | `UserInfoPath` | `string` | `/auth/userinfo` | User info route path |

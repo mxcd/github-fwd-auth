@@ -27,6 +27,7 @@ type oauthHandlerConfig struct {
 	relevantTeams    []string
 	apiKeyHandler    func(*gin.Context) bool
 	cookieSecure     bool
+	baseURL          string
 	loginPath        string
 	callbackPath     string
 	userInfoPath     string
@@ -60,6 +61,13 @@ func newOAuthHandler(config *oauthHandlerConfig) (*oauthHandler, error) {
 		config:             config,
 		deniedSessionCache: expirable.NewLRU[string, struct{}](deniedCacheSize, nil, deniedCacheTTL),
 	}, nil
+}
+
+// absoluteURL prefixes path with the configured public base URL, if set.
+// Behind a forward-auth proxy redirects must be absolute: the proxy resolves
+// relative Location headers against its own upstream address.
+func (h *oauthHandler) absoluteURL(path string) string {
+	return h.config.baseURL + path
 }
 
 func (h *oauthHandler) getHandlersChain(s *SessionStore) gin.HandlersChain {
@@ -204,7 +212,7 @@ func (h *oauthHandler) getCallbackHandler(s *SessionStore) gin.HandlerFunc {
 		c.Set("session", session)
 
 		log.Debug().Msg("redirecting to /")
-		c.Redirect(http.StatusTemporaryRedirect, "/")
+		c.Redirect(http.StatusTemporaryRedirect, h.absoluteURL("/"))
 		c.Abort()
 	}
 }
@@ -231,7 +239,7 @@ func (h *oauthHandler) getAuthHandler(s *SessionStore) gin.HandlerFunc {
 				return
 			}
 			log.Debug().Msg("no session found in auth handler. redirecting to login")
-			c.Redirect(http.StatusTemporaryRedirect, h.config.loginPath)
+			c.Redirect(http.StatusTemporaryRedirect, h.absoluteURL(h.config.loginPath))
 			c.Abort()
 			return
 		}
@@ -418,7 +426,7 @@ func (h *oauthHandler) getLogoutHandler(s *SessionStore) gin.HandlerFunc {
 		if isAPIRequest(c) {
 			c.JSON(http.StatusOK, gin.H{"message": "logged out"})
 		} else {
-			c.Redirect(http.StatusTemporaryRedirect, h.config.loginPath)
+			c.Redirect(http.StatusTemporaryRedirect, h.absoluteURL(h.config.loginPath))
 		}
 		c.Abort()
 	}

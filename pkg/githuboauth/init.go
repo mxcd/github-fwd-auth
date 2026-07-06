@@ -63,6 +63,12 @@ type Config struct {
 	// Set CookieInsecure to true ONLY for local development without HTTPS.
 	CookieInsecure bool
 
+	// Public base URL of the application (optional), e.g. https://app.example.com.
+	// When set, login redirects use absolute URLs. Required behind forward-auth
+	// proxies (e.g. Traefik forwardAuth): the proxy resolves relative Location
+	// headers against its own upstream address instead of the public host.
+	BaseURL string
+
 	// Route paths (optional, defaults shown).
 	LoginPath        string // defaults to /auth/login
 	CallbackPath     string // defaults to /auth/callback
@@ -288,6 +294,12 @@ func newHandle(cfg *Config) (*Handle, error) {
 	if cfg.RefreshTeamsPath == "" {
 		cfg.RefreshTeamsPath = "/auth/refresh-teams"
 	}
+	if cfg.BaseURL != "" {
+		cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+		if u, err := url.Parse(cfg.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, errors.New("BaseURL must be an absolute URL, e.g. https://app.example.com")
+		}
+	}
 
 	log.Info().Msg("initializing GitHub OAuth middleware")
 
@@ -382,6 +394,7 @@ func newHandle(cfg *Config) (*Handle, error) {
 		relevantTeams:             cfg.RelevantTeams,
 		apiKeyHandler:             apiKeyHandler,
 		cookieSecure:              cookieSecure,
+		baseURL:                   cfg.BaseURL,
 		loginPath:                 cfg.LoginPath,
 		callbackPath:              cfg.CallbackPath,
 		userInfoPath:              cfg.UserInfoPath,
